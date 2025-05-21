@@ -3,23 +3,29 @@
 // +0 ~> 1
 // +a ~> +a
 //
-// ?{a b} ~> 1
-// ?a     ~> 0
+// ?{a b} ~> 0
+// ?a     ~> 1
+//
+// ={a a} ~> 0
+// ={a b} ~> 1
 //
 // /{1 a}           ~> a
 // /{2 {a b}}       ~> a
 // /{3 {a b}}       ~> b
 // /{(a + a) b}     ~> /{2 /{a b}}
 // /{(a + a + 1) b} ~> /{3 /{a b}}
-// /a               ~> a
+// /a               ~> /a
 //
-// *{a 0 b}   ~> /{b a}
-// *{a 1 b}   ~> b
-// *{a 2 b c} ~> *{*{a b} *{a c}}
-// *{a 3 b}   ~> ?*{a b}
-// *{a 4 b}   ~> +*{a b}
-// *{a 5 b c} ~> ={*{a b} *{a c}}
-// *a         ~> *a
+// *{a {b c} d} ~> {*{a b c} *{a d}}
+// *{a 0 b}     ~> /{b a}
+// *{a 1 b}     ~> b
+// *{a 2 b c}   ~> *{*{a b} *{a c}}
+// *{a 3 b}     ~> ?*{a b}
+// *{a 4 b}     ~> +*{a b}
+// *{a 5 b c}   ~> ={*{a b} *{a c}}
+// *{a 6 b c d} ~> *{a *{{c d} 0 *{{2 3} 0 *{a 4 4 b}}}}
+// *{a 7 b c}   ~> *{*{a b} c}
+// *a           ~> *a
 
 use std::{collections::VecDeque, rc::Rc};
 
@@ -33,12 +39,17 @@ impl Atom {
   }
 }
 
+pub const YES: u64 = 0;
+pub const NAH: u64 = 1;
+
 const ATOM_ADDR: Atom = Atom(0);
 const ATOM_IDTY: Atom = Atom(1);
 const ATOM_EVAL: Atom = Atom(2);
 const ATOM_CELL: Atom = Atom(3);
 const ATOM_INCR: Atom = Atom(4);
 const ATOM_EQAL: Atom = Atom(5);
+const ATOM_BRCH: Atom = Atom(6);
+const ATOM_CMPS: Atom = Atom(7);
 
 thread_local! {
   pub static NOUN_ADDR: Noun = Noun::atom(ATOM_ADDR);
@@ -47,6 +58,8 @@ thread_local! {
   pub static NOUN_CELL: Noun = Noun::atom(ATOM_CELL);
   pub static NOUN_INCR: Noun = Noun::atom(ATOM_INCR);
   pub static NOUN_EQAL: Noun = Noun::atom(ATOM_EQAL);
+  pub static NOUN_BRCH: Noun = Noun::atom(ATOM_BRCH);
+  pub static NOUN_CMPS: Noun = Noun::atom(ATOM_CMPS);
 }
 
 #[derive(Clone, Debug)]
@@ -75,7 +88,7 @@ impl Noun {
   }
 }
 
-fn noun_equal(a: Noun, b: Noun) -> bool {
+fn noun_eq(a: Noun, b: Noun) -> bool {
   if Rc::ptr_eq(&a.0, &b.0) {
     return true;
   }
@@ -113,13 +126,15 @@ fn nock(noun: Noun) -> Noun {
     a => panic!("expected a cell but found {a:?}"),
   };
 
-  match &*inst {
+  match inst {
     &ATOM_ADDR => addr(subj, b.clone()),
     &ATOM_IDTY => idty(b.clone()),
     &ATOM_EVAL => eval(subj.clone(), b.clone()),
+    &ATOM_CELL => cell(subj.clone(), b.clone()),
     &ATOM_INCR => incr(subj.clone(), b.clone()),
     &ATOM_EQAL => eqal(subj.clone(), b.clone()),
-    &ATOM_CELL => cell(subj.clone(), b.clone()),
+    &ATOM_BRCH => brch(subj.clone(), b.clone()),
+    &ATOM_CMPS => cmps(subj.clone(), b.clone()),
     atom => todo!("atom = {atom:?}"),
   }
 }
@@ -191,7 +206,7 @@ fn eval(subj: Noun, form: Noun) -> Noun {
 fn incr(subj: Noun, form: Noun) -> Noun {
   let prod = nock(Noun::cell(subj, form));
   if let NounInner::Atom(atom) = &*prod.0 {
-    Noun::atom(Atom::incr(atom.clone()))
+    Noun::atom(Atom::incr(*atom))
   } else {
     panic!()
   }
@@ -207,13 +222,55 @@ fn eqal(subj: Noun, form: Noun) -> Noun {
   let evaled_b = nock(Noun::cell(subj.clone(), b));
   let evaled_c = nock(Noun::cell(subj, c));
 
-  Noun::atom(Atom(if noun_equal(evaled_b, evaled_c) { 1 } else { 0 }))
+  Noun::atom(Atom(if noun_eq(evaled_b, evaled_c) { 0 } else { 1 }))
 }
 
 #[inline(always)]
 fn cell(subj: Noun, form: Noun) -> Noun {
   let prod = nock(Noun::cell(subj, form));
-  Noun::atom(Atom(if prod.is_cell() { 1 } else { 0 }))
+  Noun::atom(Atom(if prod.is_cell() { 0 } else { 1 }))
+}
+
+#[inline(always)]
+fn brch(subj: Noun, form: Noun) -> Noun {
+  let NounInner::Cell(Cell(b, c)) = &*form.0 else {
+    panic!()
+  };
+  let NounInner::Cell(Cell(c, d)) = &*c.0 else {
+    panic!()
+  };
+
+  let brch_addr = Noun::cell(Noun::atom(Atom(2)), Noun::atom(Atom(3)));
+  let cond = Noun::cell(
+    subj.clone(),
+    Noun::cell(
+      NOUN_INCR.with(Clone::clone),
+      Noun::cell(NOUN_INCR.with(Clone::clone), b.clone()),
+    ),
+  );
+  let evaled_cond = nock(cond);
+  let addr_ = nock(Noun::cell(
+    brch_addr,
+    Noun::cell(NOUN_ADDR.with(Clone::clone), evaled_cond),
+  ));
+
+  let then_else = Noun::cell(c.clone(), d.clone());
+  let form = Noun::cell(then_else, Noun::cell(NOUN_ADDR.with(Clone::clone), addr_));
+  let form = nock(form);
+
+  nock(Noun::cell(subj, form))
+}
+
+#[inline(always)]
+fn cmps(subj: Noun, form: Noun) -> Noun {
+  let (b, c) = match &*form.0 {
+    NounInner::Cell(Cell(b, c)) => (b.clone(), c.clone()),
+    _ => todo!(),
+  };
+
+  let evaled_b = nock(Noun::cell(subj, b));
+
+  nock(Noun::cell(evaled_b, c))
 }
 
 impl std::fmt::Display for Atom {
@@ -264,33 +321,101 @@ macro_rules! syn {
     Noun::cell(syn!($a), syn!($b))
   };
   (addr) => {
-    NOUN_ADDR.with(Clone::clone)
+    crate::NOUN_ADDR.with(Clone::clone)
   };
   (idty) => {
-    NOUN_IDTY.with(Clone::clone)
+    crate::NOUN_IDTY.with(Clone::clone)
   };
   (eval) => {
-    NOUN_EVAL.with(Clone::clone)
+    crate::NOUN_EVAL.with(Clone::clone)
   };
   (cell) => {
-    NOUN_CELL.with(Clone::clone)
+    crate::NOUN_CELL.with(Clone::clone)
   };
   (incr) => {
-    NOUN_INCR.with(Clone::clone)
+    crate::NOUN_INCR.with(Clone::clone)
   };
   (eqal) => {
-    NOUN_EQAL.with(Clone::clone)
+    crate::NOUN_EQAL.with(Clone::clone)
+  };
+  (brch) => {
+    crate::NOUN_BRCH.with(Clone::clone)
+  };
+  (cmps) => {
+    crate::NOUN_CMPS.with(Clone::clone)
   };
   ($e:tt) => {
-    Noun::atom(Atom($e))
+    Noun::atom(crate::Atom($e))
   };
 }
 
+#[cfg(test)]
+mod test {
+  use crate::{Atom, Noun, nock, noun_eq};
+  use crate::{NAH, YES};
+
+  #[test]
+  fn test_addr() {
+    let a = syn!({{{{8, 42}, 5}, 2}, {addr, 9}});
+
+    let p = nock(a);
+    let e = Noun::atom(Atom(42));
+
+    assert!(noun_eq(p, e));
+  }
+
+  #[test]
+  fn test_incr() {
+    let a = syn!({40, {incr, {incr, {addr, 1}}}});
+
+    let p = nock(a);
+    let e = Noun::atom(Atom(42));
+
+    assert!(noun_eq(p, e));
+  }
+
+  #[test]
+  fn test_eval() {
+    let a = syn!({41, {eval, {{incr, {addr, 1}}, {idty, {addr, 1}}}}});
+
+    let p = nock(a);
+    let e = Noun::atom(Atom(42));
+
+    assert!(noun_eq(p, e));
+  }
+
+  #[test]
+  fn test_brch_yes() {
+    let a = syn!({YES, {brch, {{addr, 1}, {{idty, 99}, {idty, 42}}}}});
+
+    let p = nock(a);
+    let e = Noun::atom(Atom(99));
+
+    assert!(noun_eq(p, e));
+  }
+
+  #[test]
+  fn test_brch_nah() {
+    let a = syn!({NAH, {brch, {{addr, 1}, {{idty, 99}, {idty, 42}}}}});
+
+    let p = nock(a);
+    let e = Noun::atom(Atom(42));
+
+    assert!(noun_eq(p, e));
+  }
+
+  #[test]
+  fn test_cmps() {
+    // compose is like eval when quoting 'c'
+    let a = syn!({41, {cmps, {{incr, {addr, 1}}, {addr, 1}}}});
+
+    let p = nock(a);
+    let e = Noun::atom(Atom(42));
+
+    assert!(noun_eq(p, e));
+  }
+}
+
 fn main() {
-  let a = syn![
-    {{{4, {41, 42}}, 3}, {incr, {addr, 11}}}
-  ];
-  println!("a = {a:?}");
-  let p = nock(a);
-  println!("p = {p:?}");
+  todo!()
 }
