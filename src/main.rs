@@ -127,13 +127,15 @@ fn nock(noun: Noun) -> Noun {
     _ => todo!(), // return?
   };
   let (inst, b) = match &*form.0 {
-    NounInner::Cell(Cell(a, b)) => {
-      if let NounInner::Atom(a) = &*a.0 {
-        (a, b)
-      } else {
-        panic!("expected an atom but found {a:?}")
+    NounInner::Cell(Cell(inst, b)) => match &*inst.0 {
+      NounInner::Atom(inst) => (inst, b),
+      NounInner::Cell(Cell(b_, c)) => {
+        let d = b;
+        let a = Noun::cell(subj.clone(), Noun::cell(b_.clone(), c.clone()));
+        let d = Noun::cell(subj.clone(), d.clone());
+        return Noun::cell(nock(a), nock(d));
       }
-    }
+    },
     a => panic!("expected a cell but found {a:?}"),
   };
 
@@ -147,7 +149,7 @@ fn nock(noun: Noun) -> Noun {
     &ATOM_BRCH => brch(subj.clone(), b.clone()),
     &ATOM_CMPS => cmps(subj.clone(), b.clone()),
     &ATOM_EXTN => extn(subj.clone(), b.clone()),
-    &ATOM_INVK => todo!("invoke"),
+    &ATOM_INVK => invk(subj.clone(), b.clone()),
     &ATOM_RPLC => rplc(subj.clone(), b.clone()),
     &ATOM_HINT => todo!("hint"),
     atom => todo!("atom = {atom:?}"),
@@ -248,10 +250,10 @@ fn cell(subj: Noun, form: Noun) -> Noun {
 
 #[inline(always)]
 fn brch(subj: Noun, form: Noun) -> Noun {
-  let NounInner::Cell(Cell(b, c)) = &*form.0 else {
+  let NounInner::Cell(Cell(b, cd)) = &*form.0 else {
     panic!()
   };
-  let NounInner::Cell(Cell(c, d)) = &*c.0 else {
+  let NounInner::Cell(Cell(c, d)) = &*cd.0 else {
     panic!()
   };
 
@@ -302,24 +304,42 @@ fn extn(subj: Noun, form: Noun) -> Noun {
 }
 
 #[inline(always)]
+fn invk(subj: Noun, form: Noun) -> Noun {
+  let (b, c) = match &*form.0 {
+    NounInner::Cell(Cell(b, c)) => (b.clone(), c.clone()),
+    _ => panic!(),
+  };
+
+  let core = nock(Noun::cell(subj, c));
+  let eval = Noun::cell(
+    NOUN_EVAL.with(Clone::clone),
+    Noun::cell(
+      Noun::cell(NOUN_ADDR.with(Clone::clone), Noun::atom(Atom(1))),
+      Noun::cell(NOUN_ADDR.with(Clone::clone), b),
+    ),
+  );
+  nock(Noun::cell(core, eval))
+}
+
+#[inline(always)]
 fn rplc(subj: Noun, form: Noun) -> Noun {
-  let (b, d) = match &*form.0 {
+  let (bc, d) = match &*form.0 {
     NounInner::Cell(Cell(b, d)) => (b, d.clone()),
     _ => panic!(),
   };
-  let (b, c, d) = match &*b.0 {
+  let (b, c, d) = match &*bc.0 {
     NounInner::Cell(Cell(b, c)) => (b.clone(), c.clone(), d),
     _ => panic!(),
   };
   let NounInner::Atom(b) = *b.0 else { panic!() };
 
-  let evaled_c = Noun::cell(subj.clone(), c);
-  let evaled_d = Noun::cell(subj, d);
+  let evaled_c = nock(Noun::cell(subj.clone(), c));
+  let evaled_d = nock(Noun::cell(subj, d));
 
-  do_replace(b.0, evaled_c, &evaled_d)
+  rplc_at(b.0, evaled_c, &evaled_d)
 }
 
-fn do_replace(path: u64, new_val: Noun, target: &Noun) -> Noun {
+fn rplc_at(path: u64, new_val: Noun, target: &Noun) -> Noun {
   let mut cursor = 64 - path.leading_zeros() - 1;
 
   let mut stack = vec![];
@@ -443,14 +463,14 @@ macro_rules! syn {
   (hint) => {
     crate::NOUN_HINT.with(Clone::clone)
   };
-  ($e:tt) => {
+  ($e:expr) => {
     crate::Noun::atom(crate::Atom($e))
   };
 }
 
 #[cfg(test)]
 mod test {
-  use crate::{Atom, Noun, do_replace, nock, noun_eq};
+  use crate::{Atom, Noun, nock, noun_eq, rplc_at};
   use crate::{NAH, YES};
 
   #[test]
@@ -526,19 +546,53 @@ mod test {
 
   #[test]
   fn test_rplc() {
-    // 1010
     let t = syn!({{22, {89, 78}}, 44});
-    let r = do_replace(10, Noun::atom(Atom(55)), &t);
+    let r = rplc_at(10, Noun::atom(Atom(55)), &t);
     let e = syn!({{22, {55, 78}}, 44});
 
     assert!(noun_eq(r, e));
   }
+
+  #[test]
+  fn test_decr() {
+    // fn(a) {
+    //   let mut b = 0;
+    //   'trap: loop {
+    //     if +b = a {
+    //       return b;
+    //     } else {
+    //       b = +b;
+    //       continue 'trap;
+    //     }
+    //   }
+    // }
+    //
+    // core = [bat pay]
+    // where pay = [b a]
+    // and bat = loop
+
+    let s = syn!(43);
+
+    let test = syn!({eqal, {{addr, 7}, {incr, {addr, 6}}}});
+    let yes = syn!({addr, 6});
+    let new_core = syn!({{addr, 2}, {{incr, {addr, 6}}, {addr, 7}}});
+    let nah = Noun::cell(syn!(invk), Noun::cell(syn!(2), new_core));
+    let r#loop = Noun::cell(syn!(brch), Noun::cell(test, Noun::cell(yes, nah)));
+    let r#loop = Noun::cell(syn!(idty), r#loop);
+    let g = Noun::cell(
+      syn!(extn),
+      Noun::cell(
+        Noun::cell(syn!(idty), syn!(0)),
+        Noun::cell(syn!(extn), Noun::cell(r#loop, syn!({invk, {2, {addr, 1}}}))),
+      ),
+    );
+    let p = nock(Noun::cell(s, g));
+    let e = syn!(42);
+
+    assert!(noun_eq(p, e));
+  }
 }
 
 fn main() {
-  let s = syn!({{22, {89, 78}}, 44});
-  let f = syn!({addr, 10});
-  let e = Noun::cell(s, f);
-  let p = nock(e);
-  println!("p = {p:?}");
+  todo!()
 }
