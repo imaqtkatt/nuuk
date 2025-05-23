@@ -28,9 +28,15 @@
 // *{a 8 b c}      ~> *{{*{a b} a} c}
 // *{a 9 b c}      ~> *{*{a c} 2 {0 1} 0 b}
 // *{a 10 {b c} d} ~> #{b *{a c} *{a d}}
+// *{a 11 {b c} d} ~> *{{*{a c} *{a d}} 0 3}
+// *{a 11 b c}     ~> *{a c}
 // *a              ~> *a
 
-use std::{collections::VecDeque, rc::Rc};
+use std::{
+  cell::RefCell,
+  collections::{HashMap, VecDeque},
+  rc::Rc,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(transparent)]
@@ -151,8 +157,8 @@ fn nock(noun: Noun) -> Noun {
     &ATOM_EXTN => extn(subj.clone(), b.clone()),
     &ATOM_INVK => invk(subj.clone(), b.clone()),
     &ATOM_RPLC => rplc(subj.clone(), b.clone()),
-    &ATOM_HINT => todo!("hint"),
-    atom => todo!("atom = {atom:?}"),
+    &ATOM_HINT => hint(subj.clone(), b.clone()),
+    atom => panic!("unknown instruction '{atom}'"),
   }
 }
 
@@ -378,6 +384,28 @@ fn rplc_at(path: u64, new_val: Noun, target: &Noun) -> Noun {
   }
 
   result
+}
+
+#[inline(always)]
+fn hint(subj: Noun, form: Noun) -> Noun {
+  let NounInner::Cell(Cell(b, c)) = &*form.0 else {
+    panic!("expected a cell")
+  };
+
+  match &*b.0 {
+    NounInner::Atom(_hint) => nock(Noun::cell(subj, c.clone())),
+    NounInner::Cell(Cell(_b, _c_)) => {
+      let _d = c;
+      nock(Noun::cell(subj, c.clone()))
+    }
+  }
+}
+
+#[derive(Clone)]
+struct Jet(&'static fn(Noun) -> Option<Noun>);
+
+thread_local! {
+  static JETS: RefCell<HashMap<Atom, Jet>> = RefCell::new(HashMap::new());
 }
 
 impl std::fmt::Display for Atom {
